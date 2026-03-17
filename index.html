@@ -100,7 +100,7 @@
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    facingMode: "user",
+                    facingMode: "environment",
                     width: 640,
                     height: 480
                 },
@@ -138,12 +138,12 @@
 
     // 3D 透视相机
     const camera = new THREE.PerspectiveCamera(
-        60,
+        75,
         window.innerWidth / window.innerHeight,
         0.1,
         1000
     );
-    camera.position.set(0, 8, 8);
+    camera.position.set(0, 0, 12);
     camera.lookAt(0, 0, 0);
 
     const renderer = new THREE.WebGLRenderer({
@@ -236,177 +236,88 @@
     });
 
 
-    // =============================
-    // Plane
-    // =============================
-
-    // 地面 - 倾斜放置模拟车机 SR 视角
-    const groundGeometry = new THREE.PlaneGeometry(16, 12, 64, 64);
-    const ground = new THREE.Mesh(groundGeometry, material);
-    ground.rotation.x = -Math.PI / 2.5;
-    ground.position.y = -2;
-    ground.receiveShadow = true;
-    scene.add(ground);
-
-    // 车辆模型（简化版）
-    const carGroup = new THREE.Group();
-
-    // 车身
-    const bodyGeometry = new THREE.BoxGeometry(2.2, 0.8, 4.5);
-    const bodyMaterial = new THREE.MeshStandardMaterial({
-        color: 0x3366ff,
-        metalness: 0.7,
-        roughness: 0.2
-    });
-    const carBody = new THREE.Mesh(bodyGeometry, bodyMaterial);
-    carBody.position.y = 0.6;
-    carBody.castShadow = true;
-    carGroup.add(carBody);
-
-    // 车顶
-    const roofGeometry = new THREE.BoxGeometry(1.8, 0.6, 2.5);
-    const carRoof = new THREE.Mesh(roofGeometry, bodyMaterial);
-    carRoof.position.y = 1.3;
-    carRoof.position.z = -0.3;
-    carRoof.castShadow = true;
-    carGroup.add(carRoof);
-
-    // 车轮
-    const wheelGeometry = new THREE.CylinderGeometry(0.4, 0.4, 0.3, 32);
-    const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x222222 });
-    const wheelPositions = [
-        [-1.1, 0.4, 1.5], [1.1, 0.4, 1.5],
-        [-1.1, 0.4, -1.5], [1.1, 0.4, -1.5]
-    ];
-    wheelPositions.forEach(pos => {
-        const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
-        wheel.rotation.z = Math.PI / 2;
-        wheel.position.set(...pos);
-        wheel.castShadow = true;
-        carGroup.add(wheel);
-    });
-
-    scene.add(carGroup);
-
     // 灯光
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
     scene.add(ambientLight);
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1);
-    dirLight.position.set(5, 10, 5);
-    dirLight.castShadow = true;
-    scene.add(dirLight);
-
-    // 网格辅助线（车机 SR 常见）
-    const gridHelper = new THREE.GridHelper(30, 30, 0x444444, 0x222222);
-    gridHelper.position.y = -4;
-    scene.add(gridHelper);
-
     // =============================
-    // 3D Stick Figure (火柴人)
+    // Point Cloud from Video
     // =============================
-    const stickFigure = {
-        joints: {},
-        bones: []
+    const pointCloudConfig = {
+        width: 120,     // 降采样宽度
+        height: 90,     // 降采样高度
+        pointSize: 0.15,
+        depthScale: 4,  // 亮度转深度系数
+        spacing: 0.08   // 点间距
     };
 
-    const jointMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
-    const boneMaterial = new THREE.MeshBasicMaterial({ color: 0x00aa00, transparent: true, opacity: 0.8 });
+    // 创建视频处理用的 canvas
+    const videoCanvas = document.createElement('canvas');
+    videoCanvas.width = pointCloudConfig.width;
+    videoCanvas.height = pointCloudConfig.height;
+    const videoCtx = videoCanvas.getContext('2d', { willReadFrequently: true });
 
-    // 创建关节点
-    const jointNames = [
-        'nose', 'leftEye', 'rightEye', 'leftEar', 'rightEar',
-        'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow',
-        'leftWrist', 'rightWrist', 'leftHip', 'rightHip',
-        'leftKnee', 'rightKnee', 'leftAnkle', 'rightAnkle'
-    ];
+    // 创建点云几何体
+    const pointCount = pointCloudConfig.width * pointCloudConfig.height;
+    const pointGeometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(pointCount * 3);
+    const colors = new Float32Array(pointCount * 3);
 
-    jointNames.forEach(name => {
-        const geometry = new THREE.SphereGeometry(0.08, 16, 16);
-        const joint = new THREE.Mesh(geometry, jointMaterial);
-        joint.visible = false;
-        scene.add(joint);
-        stickFigure.joints[name] = joint;
+    pointGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    pointGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const pointMaterial = new THREE.PointsMaterial({
+        size: pointCloudConfig.pointSize,
+        vertexColors: true,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.9
     });
 
-    // 创建骨骼连线
-    const boneConnections = [
-        ['nose', 'leftShoulder'], ['nose', 'rightShoulder'],
-        ['leftShoulder', 'rightShoulder'],
-        ['leftShoulder', 'leftElbow'], ['leftElbow', 'leftWrist'],
-        ['rightShoulder', 'rightElbow'], ['rightElbow', 'rightWrist'],
-        ['leftShoulder', 'leftHip'], ['rightShoulder', 'rightHip'],
-        ['leftHip', 'rightHip'],
-        ['leftHip', 'leftKnee'], ['leftKnee', 'leftAnkle'],
-        ['rightHip', 'rightKnee'], ['rightKnee', 'rightAnkle']
-    ];
+    const pointCloud = new THREE.Points(pointGeometry, pointMaterial);
+    pointCloud.position.set(0, 0, 0);
+    pointCloud.rotation.x = 0;
+    scene.add(pointCloud);
 
-    boneConnections.forEach(([start, end]) => {
-        const geometry = new THREE.CylinderGeometry(0.03, 0.03, 1, 8);
-        geometry.translate(0, 0.5, 0);
-        geometry.rotateX(Math.PI / 2);
-        const bone = new THREE.Mesh(geometry, boneMaterial);
-        bone.visible = false;
-        scene.add(bone);
-        stickFigure.bones.push({ mesh: bone, start, end });
-    });
+    function updatePointCloud() {
+        if (video.readyState < 2) return;
 
-    // MediaPipe 索引映射
-    const landmarkIndex = {
-        nose: 0, leftEye: 2, rightEye: 5,
-        leftEar: 7, rightEar: 8,
-        leftShoulder: 11, rightShoulder: 12,
-        leftElbow: 13, rightElbow: 14,
-        leftWrist: 15, rightWrist: 16,
-        leftHip: 23, rightHip: 24,
-        leftKnee: 25, rightKnee: 26,
-        leftAnkle: 27, rightAnkle: 28
-    };
+        // 绘制视频到 canvas（降采样）
+        videoCtx.drawImage(video, 0, 0, pointCloudConfig.width, pointCloudConfig.height);
+        const imageData = videoCtx.getImageData(0, 0, pointCloudConfig.width, pointCloudConfig.height);
+        const data = imageData.data;
 
-    function updateStickFigure() {
-        if (!isPoseDetected || !poseLandmarks) {
-            // 隐藏所有关节和骨骼
-            Object.values(stickFigure.joints).forEach(j => j.visible = false);
-            stickFigure.bones.forEach(b => b.mesh.visible = false);
-            return;
-        }
+        const positions = pointCloud.geometry.attributes.position.array;
+        const colors = pointCloud.geometry.attributes.color.array;
 
-        const scale = 8; // 放大系数
-        const offsetX = 0;
-        const offsetY = 2;
-        const offsetZ = -2;
+        let i = 0;
+        for (let y = 0; y < pointCloudConfig.height; y++) {
+            for (let x = 0; x < pointCloudConfig.width; x++) {
+                const pixelIndex = (y * pointCloudConfig.width + x) * 4;
+                const r = data[pixelIndex];
+                const g = data[pixelIndex + 1];
+                const b = data[pixelIndex + 2];
 
-        // 更新关节位置
-        for (const [name, index] of Object.entries(landmarkIndex)) {
-            const lm = poseLandmarks[index];
-            const joint = stickFigure.joints[name];
+                // 计算亮度作为深度
+                const brightness = (r + g + b) / 3;
+                const depth = (brightness / 255) * pointCloudConfig.depthScale;
 
-            // MediaPipe: x(0-1左到右), y(0-1上到下), z(深度)
-            // 转换为 3D 空间坐标
-            joint.position.x = (1 - lm.x - 0.5) * scale + offsetX;
-            joint.position.y = (1 - lm.y - 0.5) * scale + offsetY;
-            joint.position.z = -lm.z * scale + offsetZ;
-            joint.visible = lm.visibility > 0.5;
-        }
+                // 设置位置
+                positions[i * 3] = (x - pointCloudConfig.width / 2) * pointCloudConfig.spacing;
+                positions[i * 3 + 1] = (pointCloudConfig.height / 2 - y) * pointCloudConfig.spacing;
+                positions[i * 3 + 2] = depth;
 
-        // 更新骨骼
-        stickFigure.bones.forEach(({ mesh, start, end }) => {
-            const startJoint = stickFigure.joints[start];
-            const endJoint = stickFigure.joints[end];
+                // 设置颜色（原始视频颜色）
+                colors[i * 3] = r / 255;
+                colors[i * 3 + 1] = g / 255;
+                colors[i * 3 + 2] = b / 255;
 
-            if (startJoint.visible && endJoint.visible) {
-                const startPos = startJoint.position;
-                const endPos = endJoint.position;
-
-                const distance = startPos.distanceTo(endPos);
-                mesh.scale.set(1, 1, distance);
-                mesh.position.copy(startPos);
-                mesh.lookAt(endPos);
-                mesh.visible = true;
-            } else {
-                mesh.visible = false;
+                i++;
             }
-        });
+        }
+
+        pointCloud.geometry.attributes.position.needsUpdate = true;
+        pointCloud.geometry.attributes.color.needsUpdate = true;
     }
 
 
@@ -421,15 +332,12 @@
             texture.needsUpdate = true;
         }
 
-        // 更新火柴人姿态
-        updateStickFigure();
+        // 更新点云
+        updatePointCloud();
 
         updateCamera();
         renderer.render(scene, camera);
     }
-
-    animate();
-
 
     // =============================
     // Camera Control
@@ -437,8 +345,10 @@
 
     let isDragging = false;
     let previousMousePosition = { x: 0, y: 0 };
-    let cameraAngle = { x: 0, y: 0.8 };
+    let cameraAngle = { x: 0, y: 0 };
     const cameraDistance = 12;
+
+    animate();
 
     document.addEventListener('mousedown', (e) => {
         isDragging = true;
