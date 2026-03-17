@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Title</title>
+    <title>纯视觉 SR - 姿态感知</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
 </head>
 <style>
     body {
@@ -10,37 +14,116 @@
         background: black;
         overflow: hidden;
     }
-
-    video {
+    #video {
         display: none;
+    }
+    #debug-canvas {
+        position: absolute;
+        bottom: 10px;
+        right: 10px;
+        width: 160px;
+        height: 120px;
+        border: 1px solid #444;
+        opacity: 0.7;
+    }
+    #info {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        color: #0f0;
+        font-family: monospace;
+        font-size: 12px;
+        z-index: 100;
     }
 </style>
 
-
 <body>
+<video id="video" playsinline autoplay muted></video>
+<canvas id="debug-canvas"></canvas>
+<div id="info">纯视觉 SR Demo<br>检测中...</div>
 <script src="https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js"></script>
 <script>
 
     // =============================
+    // Global Variables
+    // =============================
+    const video = document.getElementById("video");
+    const debugCanvas = document.getElementById("debug-canvas");
+    const debugCtx = debugCanvas.getContext("2d");
+    debugCanvas.width = 320;
+    debugCanvas.height = 240;
+
+    let poseLandmarks = null;
+    let isPoseDetected = false;
+
+    // =============================
+    // MediaPipe Pose Setup
+    // =============================
+    const pose = new Pose({
+        locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }
+    });
+
+    pose.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        enableSegmentation: false,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    pose.onResults((results) => {
+        debugCtx.save();
+        debugCtx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+        debugCtx.drawImage(results.image, 0, 0, debugCanvas.width, debugCanvas.height);
+
+        if (results.poseLandmarks) {
+            poseLandmarks = results.poseLandmarks;
+            isPoseDetected = true;
+            drawConnectors(debugCtx, results.poseLandmarks, POSE_CONNECTIONS,
+                {color: '#00FF00', lineWidth: 2});
+            drawLandmarks(debugCtx, results.poseLandmarks,
+                {color: '#FF0000', lineWidth: 1, radius: 2});
+            document.getElementById("info").innerHTML = "纯视觉 SR Demo<br>✓ 检测到人体";
+        } else {
+            isPoseDetected = false;
+            document.getElementById("info").innerHTML = "纯视觉 SR Demo<br>○ 未检测到人体";
+        }
+        debugCtx.restore();
+    });
+
+    // =============================
     // Camera
     // =============================
-
-    const video = document.getElementById("video");
-
     async function startCamera() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: "user",
+                    width: 640,
+                    height: 480
+                },
+                audio: false
+            });
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-                facingMode: "environment",
-                width: 640,
-                height: 480
-            },
-            audio: false
-        });
+            video.srcObject = stream;
+            await video.play();
+            console.log("Camera started successfully");
 
-        video.srcObject = stream;
+            // Start pose detection loop
+            detectPose();
+        } catch (err) {
+            console.error("Camera error:", err);
+            alert("无法启动摄像头: " + err.message);
+        }
+    }
 
-        await video.play();
+    async function detectPose() {
+        if (video.readyState >= 2) {
+            await pose.send({image: video});
+        }
+        requestAnimationFrame(detectPose);
     }
 
     startCamera();
@@ -51,21 +134,26 @@
     // =============================
 
     const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111111);
 
-    const camera = new THREE.OrthographicCamera(
-        -1, 1,
-        1, -1,
-        0, 1
+    // 3D 透视相机
+    const camera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000
     );
+    camera.position.set(0, 8, 8);
+    camera.lookAt(0, 0, 0);
 
     const renderer = new THREE.WebGLRenderer({
         antialias: true
     });
-
     renderer.setSize(
         window.innerWidth,
         window.innerHeight
     );
+    renderer.shadowMap.enabled = true;
 
     document.body.appendChild(renderer.domElement);
 
@@ -78,7 +166,7 @@
 
     texture.minFilter = THREE.LinearFilter;
     texture.magFilter = THREE.LinearFilter;
-    texture.format = THREE.RGBFormat;
+    texture.colorSpace = THREE.SRGBColorSpace;
 
 
     // =============================
@@ -112,32 +200,35 @@
     varying vec2 vUv;
 
     void main() {
+      vec2 px = vec2(1.0/640.0, 1.0/480.0);
 
-      vec2 px =
-        vec2(
-          1.0/640.0,
-          1.0/480.0
-        );
+      vec3 c = texture2D(tex, vUv).rgb;
 
-      vec3 c =
-        texture2D(tex, vUv).rgb;
-
+      // 8邻域采样做更精细的锐化
       vec3 blur =
-        texture2D(tex, vUv + vec2(px.x,0)).rgb +
-        texture2D(tex, vUv - vec2(px.x,0)).rgb +
-        texture2D(tex, vUv + vec2(0,px.y)).rgb +
-        texture2D(tex, vUv - vec2(0,px.y)).rgb;
+        texture2D(tex, vUv + vec2(px.x, 0)).rgb * 0.125 +
+        texture2D(tex, vUv - vec2(px.x, 0)).rgb * 0.125 +
+        texture2D(tex, vUv + vec2(0, px.y)).rgb * 0.125 +
+        texture2D(tex, vUv - vec2(0, px.y)).rgb * 0.125 +
+        texture2D(tex, vUv + vec2(px.x, px.y)).rgb * 0.0625 +
+        texture2D(tex, vUv - vec2(px.x, px.y)).rgb * 0.0625 +
+        texture2D(tex, vUv + vec2(px.x, -px.y)).rgb * 0.0625 +
+        texture2D(tex, vUv - vec2(px.x, -px.y)).rgb * 0.0625;
 
-      blur /= 4.0;
+      // 自适应锐化：边缘增强更激进
+      float edge = length(c - blur);
+      float sharpenStrength = 1.5 + edge * 2.0;
 
-      // SR / sharpen
-      vec3 sr =
-        c * 1.6 -
-        blur * 0.6;
+      vec3 sr = c * sharpenStrength - blur * (sharpenStrength - 1.0);
 
-      gl_FragColor =
-        vec4(sr,1.0);
+      // 对比度增强
+      sr = (sr - 0.5) * 1.2 + 0.5;
 
+      // 饱和度微调
+      float luminance = dot(sr, vec3(0.299, 0.587, 0.114));
+      sr = mix(vec3(luminance), sr, 1.1);
+
+      gl_FragColor = vec4(clamp(sr, 0.0, 1.0), 1.0);
     }
 
   `
@@ -149,12 +240,174 @@
     // Plane
     // =============================
 
-    const plane = new THREE.Mesh(
-        new THREE.PlaneGeometry(2,2),
-        material
-    );
+    // 地面 - 倾斜放置模拟车机 SR 视角
+    const groundGeometry = new THREE.PlaneGeometry(16, 12, 64, 64);
+    const ground = new THREE.Mesh(groundGeometry, material);
+    ground.rotation.x = -Math.PI / 2.5;
+    ground.position.y = -2;
+    ground.receiveShadow = true;
+    scene.add(ground);
 
-    scene.add(plane);
+    // 车辆模型（简化版）
+    const carGroup = new THREE.Group();
+
+    // 车身
+    const bodyGeometry = new THREE.BoxGeometry(2.2, 0.8, 4.5);
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+        color: 0x3366ff,
+        metalness: 0.7,
+        roughness: 0.2
+    });
+    const carBody = new THREE.Mesh(bodyGeometry, bodyMaterial);
+    carBody.position.y = 0.6;
+    carBody.castShadow = true;
+    carGroup.add(carBody);
+
+    // 车顶
+    const roofGeometry = new THREE.BoxGeometry(1.8, 0.6, 2.5);
+    const carRoof = new THREE.Mesh(roofGeometry, bodyMaterial);
+    carRoof.position.y = 1.3;
+    carRoof.position.z = -0.3;
+    carRoof.castShadow = true;
+    carGroup.add(carRoof);
+
+    // 车轮
+    const wheelGeometry = new THREE.CylinderGeometry(0.4, 0.4, 0.3, 32);
+    const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x222222 });
+    const wheelPositions = [
+        [-1.1, 0.4, 1.5], [1.1, 0.4, 1.5],
+        [-1.1, 0.4, -1.5], [1.1, 0.4, -1.5]
+    ];
+    wheelPositions.forEach(pos => {
+        const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+        wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(...pos);
+        wheel.castShadow = true;
+        carGroup.add(wheel);
+    });
+
+    scene.add(carGroup);
+
+    // 灯光
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+    dirLight.position.set(5, 10, 5);
+    dirLight.castShadow = true;
+    scene.add(dirLight);
+
+    // 网格辅助线（车机 SR 常见）
+    const gridHelper = new THREE.GridHelper(30, 30, 0x444444, 0x222222);
+    gridHelper.position.y = -4;
+    scene.add(gridHelper);
+
+    // =============================
+    // 3D Stick Figure (火柴人)
+    // =============================
+    const stickFigure = {
+        joints: {},
+        bones: []
+    };
+
+    const jointMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+    const boneMaterial = new THREE.MeshBasicMaterial({ color: 0x00aa00, transparent: true, opacity: 0.8 });
+
+    // 创建关节点
+    const jointNames = [
+        'nose', 'leftEye', 'rightEye', 'leftEar', 'rightEar',
+        'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow',
+        'leftWrist', 'rightWrist', 'leftHip', 'rightHip',
+        'leftKnee', 'rightKnee', 'leftAnkle', 'rightAnkle'
+    ];
+
+    jointNames.forEach(name => {
+        const geometry = new THREE.SphereGeometry(0.08, 16, 16);
+        const joint = new THREE.Mesh(geometry, jointMaterial);
+        joint.visible = false;
+        scene.add(joint);
+        stickFigure.joints[name] = joint;
+    });
+
+    // 创建骨骼连线
+    const boneConnections = [
+        ['nose', 'leftShoulder'], ['nose', 'rightShoulder'],
+        ['leftShoulder', 'rightShoulder'],
+        ['leftShoulder', 'leftElbow'], ['leftElbow', 'leftWrist'],
+        ['rightShoulder', 'rightElbow'], ['rightElbow', 'rightWrist'],
+        ['leftShoulder', 'leftHip'], ['rightShoulder', 'rightHip'],
+        ['leftHip', 'rightHip'],
+        ['leftHip', 'leftKnee'], ['leftKnee', 'leftAnkle'],
+        ['rightHip', 'rightKnee'], ['rightKnee', 'rightAnkle']
+    ];
+
+    boneConnections.forEach(([start, end]) => {
+        const geometry = new THREE.CylinderGeometry(0.03, 0.03, 1, 8);
+        geometry.translate(0, 0.5, 0);
+        geometry.rotateX(Math.PI / 2);
+        const bone = new THREE.Mesh(geometry, boneMaterial);
+        bone.visible = false;
+        scene.add(bone);
+        stickFigure.bones.push({ mesh: bone, start, end });
+    });
+
+    // MediaPipe 索引映射
+    const landmarkIndex = {
+        nose: 0, leftEye: 2, rightEye: 5,
+        leftEar: 7, rightEar: 8,
+        leftShoulder: 11, rightShoulder: 12,
+        leftElbow: 13, rightElbow: 14,
+        leftWrist: 15, rightWrist: 16,
+        leftHip: 23, rightHip: 24,
+        leftKnee: 25, rightKnee: 26,
+        leftAnkle: 27, rightAnkle: 28
+    };
+
+    function updateStickFigure() {
+        if (!isPoseDetected || !poseLandmarks) {
+            // 隐藏所有关节和骨骼
+            Object.values(stickFigure.joints).forEach(j => j.visible = false);
+            stickFigure.bones.forEach(b => b.mesh.visible = false);
+            return;
+        }
+
+        const scale = 8; // 放大系数
+        const offsetX = 0;
+        const offsetY = 2;
+        const offsetZ = -2;
+
+        // 更新关节位置
+        for (const [name, index] of Object.entries(landmarkIndex)) {
+            const lm = poseLandmarks[index];
+            const joint = stickFigure.joints[name];
+
+            // MediaPipe: x(0-1左到右), y(0-1上到下), z(深度)
+            // 转换为 3D 空间坐标
+            joint.position.x = (1 - lm.x - 0.5) * scale + offsetX;
+            joint.position.y = (1 - lm.y - 0.5) * scale + offsetY;
+            joint.position.z = -lm.z * scale + offsetZ;
+            joint.visible = lm.visibility > 0.5;
+        }
+
+        // 更新骨骼
+        stickFigure.bones.forEach(({ mesh, start, end }) => {
+            const startJoint = stickFigure.joints[start];
+            const endJoint = stickFigure.joints[end];
+
+            if (startJoint.visible && endJoint.visible) {
+                const startPos = startJoint.position;
+                const endPos = endJoint.position;
+
+                const distance = startPos.distanceTo(endPos);
+                mesh.scale.set(1, 1, distance);
+                mesh.position.copy(startPos);
+                mesh.lookAt(endPos);
+                mesh.visible = true;
+            } else {
+                mesh.visible = false;
+            }
+        });
+    }
 
 
     // =============================
@@ -162,23 +415,58 @@
     // =============================
 
     function animate() {
-
         requestAnimationFrame(animate);
 
         if (video.readyState >= 2) {
-
             texture.needsUpdate = true;
-
         }
 
-        renderer.render(
-            scene,
-            camera
-        );
+        // 更新火柴人姿态
+        updateStickFigure();
+
+        updateCamera();
+        renderer.render(scene, camera);
     }
 
     animate();
 
+
+    // =============================
+    // Camera Control
+    // =============================
+
+    let isDragging = false;
+    let previousMousePosition = { x: 0, y: 0 };
+    let cameraAngle = { x: 0, y: 0.8 };
+    const cameraDistance = 12;
+
+    document.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        previousMousePosition = { x: e.clientX, y: e.clientY };
+    });
+
+    document.addEventListener('mouseup', () => {
+        isDragging = false;
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+
+        const deltaX = e.clientX - previousMousePosition.x;
+        const deltaY = e.clientY - previousMousePosition.y;
+
+        cameraAngle.x -= deltaX * 0.01;
+        cameraAngle.y = Math.max(0.1, Math.min(Math.PI / 2 - 0.1, cameraAngle.y - deltaY * 0.01));
+
+        previousMousePosition = { x: e.clientX, y: e.clientY };
+    });
+
+    function updateCamera() {
+        camera.position.x = Math.sin(cameraAngle.x) * Math.cos(cameraAngle.y) * cameraDistance;
+        camera.position.y = Math.sin(cameraAngle.y) * cameraDistance;
+        camera.position.z = Math.cos(cameraAngle.x) * Math.cos(cameraAngle.y) * cameraDistance;
+        camera.lookAt(0, 0, 0);
+    }
 
     // =============================
     // Resize
@@ -187,12 +475,12 @@
     window.addEventListener(
         "resize",
         () => {
-
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
             renderer.setSize(
                 window.innerWidth,
                 window.innerHeight
             );
-
         }
     );
 
