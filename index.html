@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<style>
+    body {
+        margin: 0;
+        background: black;
+        overflow: hidden;
+    }
+
+    video {
+        display: none;
+    }
+</style>
+
+<body>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js"></script>
+<script>
+
+    // =============================
+    // Camera
+    // =============================
+
+    const video = document.getElementById("video");
+
+    async function startCamera() {
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: "environment",
+                width: 640,
+                height: 480
+            },
+            audio: false
+        });
+
+        video.srcObject = stream;
+
+        await video.play();
+    }
+
+    startCamera();
+
+
+    // =============================
+    // Three.js
+    // =============================
+
+    const scene = new THREE.Scene();
+
+    const camera = new THREE.OrthographicCamera(
+        -1, 1,
+        1, -1,
+        0, 1
+    );
+
+    const renderer = new THREE.WebGLRenderer({
+        antialias: true
+    });
+
+    renderer.setSize(
+        window.innerWidth,
+        window.innerHeight
+    );
+
+    document.body.appendChild(renderer.domElement);
+
+
+    // =============================
+    // Video Texture
+    // =============================
+
+    const texture = new THREE.VideoTexture(video);
+
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.format = THREE.RGBFormat;
+
+
+    // =============================
+    // SR Shader
+    // =============================
+
+    const material = new THREE.ShaderMaterial({
+
+        uniforms: {
+            tex: { value: texture }
+        },
+
+        vertexShader: `
+
+    varying vec2 vUv;
+
+    void main() {
+
+      vUv = uv;
+
+      gl_Position =
+        vec4(position, 1.0);
+
+    }
+
+  `,
+
+        fragmentShader: `
+
+    uniform sampler2D tex;
+    varying vec2 vUv;
+
+    void main() {
+
+      vec2 px =
+        vec2(
+          1.0/640.0,
+          1.0/480.0
+        );
+
+      vec3 c =
+        texture2D(tex, vUv).rgb;
+
+      vec3 blur =
+        texture2D(tex, vUv + vec2(px.x,0)).rgb +
+        texture2D(tex, vUv - vec2(px.x,0)).rgb +
+        texture2D(tex, vUv + vec2(0,px.y)).rgb +
+        texture2D(tex, vUv - vec2(0,px.y)).rgb;
+
+      blur /= 4.0;
+
+      // SR / sharpen
+      vec3 sr =
+        c * 1.6 -
+        blur * 0.6;
+
+      gl_FragColor =
+        vec4(sr,1.0);
+
+    }
+
+  `
+
+    });
+
+
+    // =============================
+    // Plane
+    // =============================
+
+    const plane = new THREE.Mesh(
+        new THREE.PlaneGeometry(2,2),
+        material
+    );
+
+    scene.add(plane);
+
+
+    // =============================
+    // Render Loop
+    // =============================
+
+    function animate() {
+
+        requestAnimationFrame(animate);
+
+        if (video.readyState >= 2) {
+
+            texture.needsUpdate = true;
+
+        }
+
+        renderer.render(
+            scene,
+            camera
+        );
+    }
+
+    animate();
+
+
+    // =============================
+    // Resize
+    // =============================
+
+    window.addEventListener(
+        "resize",
+        () => {
+
+            renderer.setSize(
+                window.innerWidth,
+                window.innerHeight
+            );
+
+        }
+    );
+
+
+</script>
+
+
+</body>
+</html>
